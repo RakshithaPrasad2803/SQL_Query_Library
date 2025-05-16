@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS pl_lines_35m;
+
+CREATE TABLE pl_lines_35m AS
+SELECT
+  id,
+  dcil_id,
+  public.st_extendinglines(
+    geom,
+    0.0::double precision,
+    35.0::double precision,
+    0.0::double precision,
+    35.0::double precision
+  ) AS geom
+FROM pl_lines_0_1m;
