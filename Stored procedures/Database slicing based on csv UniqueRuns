@@ -1,0 +1,328 @@
+USE [master]
+GO
+/****** Object:  StoredProcedure [dbo].[new_Testing_spDatabaseSlice_RWG_new]    Script Date: 4/22/2025 3:21:45 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER Procedure [dbo].[new_Testing_spDatabaseSlice_RWG_new]
+	@BackupFilePath Varchar(500), 
+	@CSVPath NVARCHAR(1000), 
+	@MasterDatabaseName Varchar(280),
+	@NumOfBackup int
+	
+	As
+Begin
+--generate a blank DB
+exec('exec [dbo].[To_Generate_Blank_DB] '''+@BackupFilePath+''','''+@MasterDatabaseName+'''');
+
+-- Retrieve file list from backup 
+DECLARE @FileListTable TABLE (
+    LogicalName NVARCHAR(128),
+    PhysicalName NVARCHAR(260),
+    [Type] CHAR(1),
+    FileGroupName NVARCHAR(128),
+    [Size] NUMERIC(20, 0),
+    MaxSize NUMERIC(20, 0),
+    FileID BIGINT,
+    CreateLSN NUMERIC(25, 0),
+    DropLSN NUMERIC(25, 0),
+    UniqueID UNIQUEIDENTIFIER,
+    ReadOnlyLSN NUMERIC(25, 0),
+    ReadWriteLSN NUMERIC(25, 0),
+    BackupSizeInBytes BIGINT,
+    SourceBlockSize INT,
+    FileGroupID INT,
+    LogGroupGUID UNIQUEIDENTIFIER,
+    DifferentialBaseLSN NUMERIC(25, 0),
+    DifferentialBaseGUID UNIQUEIDENTIFIER,
+    IsReadOnly BIT,
+    IsPresent BIT,
+    TDEThumbprint VARBINARY(32),
+    SnapshotURL NVARCHAR(360)
+);
+
+Declare @BackupPath nvarchar(max) = @BackupFilePath+'Master_DB\'+@MasterDatabaseName+'_Master.bak'; --build full path to bak file
+DECLARE @DBname NVARCHAR(MAX) = @MasterDatabaseName + '_Master'; --master db naming
+DECLARE @MDFLogicalName NVARCHAR(128); --for storing logical names
+DECLARE @LDFLogicalName NVARCHAR(128);
+
+DECLARE @sql NVARCHAR(MAX) = 'RESTORE FILELISTONLY FROM DISK = ''' + @BackupPath + ''''; --logical files inserted into filelistable
+INSERT INTO @FileListTable EXEC(@sql);
+
+SELECT @MDFLogicalName = LogicalName FROM @FileListTable WHERE [Type] = 'D'; -- MDF file 
+SELECT @LDFLogicalName = LogicalName FROM @FileListTable WHERE [Type] = 'L'; -- LDF file
+
+DECLARE @MDFPath NVARCHAR(260) = @BackupFilePath+'Master_DB\' + @DBname + '.mdf'; --mdf,ldf path
+DECLARE @LDFPath NVARCHAR(260) = @BackupFilePath + 'Master_DB\'+@DBname + '_log.ldf';
+
+-- Restore Database
+SET @sql = 'RESTORE DATABASE ' + QUOTENAME(@DBname) + ' FROM DISK = ''' + @BackupPath + ''' WITH MOVE ''' + @MDFLogicalName + ''' TO ''' + @MDFPath + ''', MOVE ''' + @LDFLogicalName + ''' TO ''' + @LDFPath + ''';';
+EXEC(@sql); --maps logical filenames to path
+
+Declare @CrackMaxID integer 
+
+EXEC ('
+
+     IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE ID = OBJECT_ID(N''tempdb..#GetMaxCrackID'')) 
+     BEGIN 
+       DROP TABLE #GetMaxCrackID 
+     END
+  ')
+
+	CREATE TABLE #GetMaxCrackID(MaxCrackID int);
+
+	EXEC
+	('
+		INSERT INTO #GetMaxCrackID(MaxCrackID) --highest idcrack present in master DB
+		Select ISNULL(max(IDCrack),0) from ['+ @MasterDatabaseName + '].[Distress].Cracks 
+	')
+	
+	Drop table if exists #UniqueRunsToImporting; --table for csv holding uniqueruns
+	CREATE TABLE #UniqueRunsToImporting (UniqueRun varchar(max) NOT NULL,Starting nvarchar(max),Ending nvarchar(max)
+			,Length nvarchar(max),ImageFolder nvarchar(max),Parts nvarchar(max),Remarks nvarchar(max));
+		
+	exec ('
+		BULK INSERT #UniqueRunsToImporting --bulk insert csv 
+			FROM  '''+ @CSVPath +'''
+			WITH
+				(  FIRSTROW = 2,
+					FIELDTERMINATOR = '','',
+					ROWTERMINATOR = ''\n'',
+					KEEPNULLS
+				)
+		')
+
+		delete from #UniqueRunsToImporting where Parts is null; --remove invalid rows
+		
+		Drop table if exists #UniqueRunsToImport_new; --group uniquerun by parts
+		Create table #UniqueRunsToImport_new(id integer identity,UniqueRun varchar(max),parts varchar(max));
+		
+		
+		Insert into #UniqueRunsToImport_new(UniqueRun,parts)
+		Select STRING_AGG(SUBSTRING(Uniquerun,0,9),',') as UniqueRun,Parts 
+		from #UniqueRunsToImporting 
+		group by Parts
+		order by Parts;
+
+		--Select * from #UniqueRunsToImport_new; 
+	
+	Drop table if exists #Uniq_Runs; --set mapping for 30 parts
+	Create table #Uniq_Runs (id integer,UniqueRun varchar(max));
+	insert into #Uniq_Runs (id)
+	VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20),(21),(22),(23),(24),(25),(26),(27),(28),(29),(30);
+
+	UPDATE au --match grouped runs to ids
+	SET au.UniqueRun = b.UniqueRun
+	FROM #Uniq_Runs au,
+	#UniqueRunsToImport_new b where b.id = au.id;
+
+
+--core slicing
+	SELECT @CrackMaxID = MaxCrackID FROM  #GetMaxCrackID; --max idcrack 
+
+
+	DECLARE @CommandExec AS Varchar(MAX);
+	
+	-- Select max(IDCrack),max(IDCrack)+2500000 from Distress.Cracks
+	  
+	DECLARE @path VARCHAR(500) --loop variables for file naming,backup paths, identities
+	DECLARE @name VARCHAR(500)
+	DECLARE @pathwithname VARCHAR(500)
+	DEClARE @ID int
+	Declare @chkIdentity int 
+	Declare @CrackChkIdentity int
+	Declare @EndName varchar(100)
+
+	Set @EndName = 'P0' --for naming file like p01,p02 etc.
+	-- 2. Setting the backup path
+	SET @ID=0
+	SET @path = @BackupFilePath;--'E:\Backup\'
+		
+	Set @chkIdentity = 1000000;  --seed for identity
+	set @CrackChkIdentity = @CrackMaxID + 3000000; --seed for cracks
+	WHILE @ID < @NumOfBackup --start looping through slices
+	BEGIN 
+		 DECLARE @Uniqueruns NVARCHAR(MAX);
+
+            IF @ID = 0 --looping assign parts unqiueruns 
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 1
+            ELSE IF @ID = 1
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 2
+            ELSE IF @ID = 2
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 3
+		    ELSE IF @ID = 3
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 4
+		    ELSE IF @ID = 4
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 5
+		    ELSE IF @ID = 5
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 6
+		    ELSE IF @ID = 6
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 7
+		    ELSE IF @ID = 7
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 8
+		    ELSE IF @ID = 8
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 9
+		    ELSE IF @ID = 9
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 10
+			ELSE IF @ID = 10
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 11
+			ELSE IF @ID = 11
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 12
+			ELSE IF @ID = 12
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 13
+			ELSE IF @ID = 13
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 14
+			ELSE IF @ID = 14
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 15
+			ELSE IF @ID = 15
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 16
+			ELSE IF @ID = 16
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 17
+			ELSE IF @ID = 17
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 18
+			ELSE IF @ID = 18
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 19
+			ELSE IF @ID = 19
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 20
+			ELSE IF @ID = 20
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 21
+			ELSE IF @ID = 21
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 22
+			ELSE IF @ID = 22
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 23
+			ELSE IF @ID = 23
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 24
+			ELSE IF @ID = 24
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 25
+			ELSE IF @ID = 25
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 26
+			ELSE IF @ID = 26
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 27
+			ELSE IF @ID = 27
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 28
+			ELSE IF @ID = 28
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 29
+			ELSE IF @ID = 29
+        Select @Uniqueruns = UniqueRun from #Uniq_Runs where id = 30
+
+--clean existing data in sliced db
+		DECLARE @DeleteCracks AS NVARCHAR(MAX);
+		SET @DeleteCracks = 'TRUNCATE TABLE ' + @DBname + '.[Distress].Cracks';
+		EXEC (@DeleteCracks);
+ 
+		DECLARE @DeleteDistress AS NVARCHAR(MAX);
+		SET @DeleteDistress = 'DELETE FROM ' + @DBname + '.[Distress].DistressRecords';
+		EXEC (@DeleteDistress);
+
+		DECLARE @DeleteEvents AS NVARCHAR(MAX);
+		SET @DeleteEvents = 'TRUNCATE TABLE ' + @DBname + '.[dbo].EventRecords';
+		EXEC (@DeleteEvents);
+
+
+		DECLARE @SqlQuery NVARCHAR(MAX);
+		SET @SqlQuery = ' --insert cracks,distress and events from main db to sliced db
+
+							SET IDENTITY_INSERT ['+ @DBname +'].[distress].[Cracks] ON
+							INSERT INTO [' +@DBname +'].[distress].Cracks(IDCrack,IDSourceFrame,IsEdited,SlantAngle,OffsetX, OffsetY, CrackWidth, CrackLength, CrackDensity,Depth,IDSession,IDCrackSet,IsSealed)
+							SELECT CR.IDCrack,CR.IDSourceFrame,CR.IsEdited,CR.SlantAngle,CR.OffsetX,CR.OffsetY, CR.CrackWidth, CR.CrackLength, CR.CrackDensity,CR.Depth,CR.IDSession,Null,CR.IsSealed 
+							from ['+ @MasterDatabaseName +'].[distress].Cracks CR 
+							inner join ['+ @MasterDatabaseName +'].[distress].SourceFrames SF on CR.IDSourceFrame = Sf.IDSourceFrame
+							INNER JOIN  ['+ @MasterDatabaseName +'].[DBO].DCSessions Dcs on SF.IDSession = Dcs.IDSession
+							Where Dcs.UniqueRun in (''' + REPLACE(@UniqueRuns, ',', ''',''') + ''')
+							SET IDENTITY_INSERT ['+ @DBname +'].[distress].[Cracks] OFF
+
+							SET IDENTITY_INSERT ['+ @DBname +'].[distress].[DistressRecords] ON
+							INSERT INTO [' +@DBname +'].[distress].DistressRecords(IDDistressRecord,IDDistressType,IDSeverity,IDSession,DistanceStamp,Length,StartX,EndX,IsManual)
+							SELECT dr.IDDistressRecord,dr.IDDistressType,dr.IDSeverity,dr.IDSession,dr.DistanceStamp,dr.Length,dr.StartX,dr.EndX,dr.IsManual 
+							FROM ['+ @MasterDatabaseName +'].[distress].DistressRecords DR
+							INNER JOIN ['+ @MasterDatabaseName +'].[DBO].DCSESSIONS dc ON DC.IDSESSION = DR.IDSESSION 
+							Where Dc.UniqueRun in  (''' + REPLACE(@UniqueRuns, ',', ''',''') + ''')
+							SET IDENTITY_INSERT ['+ @DBname +'].[distress].[DistressRecords] OFF
+							
+							SET IDENTITY_INSERT ['+ @DBname +'].[dbo].[EventRecords] ON
+							Insert into [' +@DBname +'].[dbo].EventRecords(IDEventRecord,IDEventScore,IDSession,DistanceStamp,Length,Comment)
+							Select  ER.IDEventRecord,ER.IDEventScore,ER.IDSession,ER.DistanceStamp,ER.Length,ER.Comment 
+							from ['+ @MasterDatabaseName +'].[dbo].EventRecords ER 
+							INNER JOIN ['+ @MasterDatabaseName +'].[DBO].DCSESSIONS dc ON DC.IDSESSION = ER.IDSESSION 
+							WHERE  Dc.UniqueRun in  (''' + REPLACE(@UniqueRuns, ',', ''',''') + ''')
+							SET IDENTITY_INSERT ['+ @DBname +'].[dbo].[EventRecords] OFF'
+
+EXEC sp_executesql @SqlQuery;
+
+
+--reset identities
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].distress.Cracks' + '''' + ', RESEED,'+ Cast(@CrackChkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].wf.TransitionFragments' + '''' + ', RESEED,'+ Cast(@chkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].wf.TransitionStatuses' + '''' + ', RESEED,'+ Cast(@chkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].distress.CrackSetRegions' + '''' + ', RESEED,'+ Cast(@chkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].distress.CrackSets' + '''' + ', RESEED,'+ Cast(@chkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].distress.DistressRecordMetrics' + '''' + ', RESEED,'+ Cast(@chkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+		Set @CommandExec = 'DBCC CHECKIDENT ('+ '''' + '[' + @DBname + '].distress.DistressRecords' + '''' + ', RESEED,'+ Cast(@chkIdentity as varchar(100)) +')';
+		Exec (@CommandExec);
+
+		-- 3. Getting the time values
+
+		   SET @ID = @ID+ 1;
+		 
+		-- 4. Defining the filename format
+		 if @ID > 9 
+		 Begin --build full path for bakup file with prefix
+		 Set @EndName = 'P' 
+		 ENd
+		 
+		SELECT @name =@MasterDatabaseName + '_' + @EndName + cast(@ID as nvarchar(10)) 
+		 
+		SET @pathwithname = @path + @name + '.bak' 
+		 
+			exec('ALTER TABLE '+@DBname+'.[distress].[Cracks] REBUILD PARTITION = ALL
+			WITH (DATA_COMPRESSION = ROW)') --compress cracks
+
+			exec('ALTER TABLE '+@DBname+'.[distress].[Cracks] REBUILD PARTITION = ALL
+			WITH (DATA_COMPRESSION = PAGE)')
+
+		 exec(' --shrinking mdf & ldf
+			use '+@DBname+';
+
+			ALTER DATABASE '+@DBname+' SET RECOVERY SIMPLE WITH NO_WAIT 
+
+			DECLARE @RowFileName NVARCHAR(128)  --Get File Names for MDF & LDF
+			SELECT @RowFileName = name FROM ['+@DBname+'].sys.database_files WHERE type_desc = ''ROWS''
+
+			DECLARE @logFileName NVARCHAR(128)
+			SELECT @logFileName = name FROM ['+@DBname+'].sys.database_files WHERE type_desc = ''LOG''
+			DECLARE @shrink_num_mdf int
+
+			Select @shrink_num_mdf = --diff between allocated and used space size/128->MB, fileproperty(name,spaceused)-> used space
+			abs(size/128.0-   
+			(size/128.0 - CAST(FILEPROPERTY(name, ''SpaceUsed'') AS INT)/128.0))+50
+			FROM sys.database_files WHERE type_desc = ''ROWS''
+
+			DBCC SHRINKFILE(@RowFileName, @shrink_num_mdf) -- Shrink the Files
+
+			DBCC SHRINKFILE(@logFileName, 0)
+
+			ALTER DATABASE '+@DBname+'  SET RECOVERY FULL WITH NO_WAIT
+			');
+
+
+		--5. Executing the backup command
+		 
+		BACKUP DATABASE @DBname 
+		TO DISK = @pathwithname WITH NOFORMAT, NOINIT, SKIP, REWIND, NOUNLOAD, STATS = 10 --backing up the sliced db
+		
+		Set @chkIdentity = @chkIdentity + 1000000 --new identities for next slice
+		set @CrackChkIdentity = @CrackChkIdentity + 3000000
+	END;
+	DECLARE @DropSQL NVARCHAR(MAX) = 'DROP DATABASE ' + QUOTENAME(@DBname); --drop temp sliced db after it is backed up
+	EXEC(@DropSQL);
+		Drop table if exists #Uniq_Runs; -- drop the temp table holding uniqueruns
+
+END
