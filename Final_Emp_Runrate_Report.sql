@@ -172,7 +172,7 @@ BEGIN
     -- Delete existing data for the target month.
    
     DELETE FROM Emp_Runrate_Report
-    WHERE `Month` = @TargetMonth OR `Month` = @ThisMonthHR;
+    WHERE `Month` IN (@TargetMonth,@ThisMonthHR)
 
     -- *** OPTIMIZATION: Create a single combined and pre-filtered temporary table for process logs ***
     DROP TEMPORARY TABLE IF EXISTS temp_combined_processlog;
@@ -214,11 +214,11 @@ BEGIN
     CREATE TEMPORARY TABLE base_employees AS
     SELECT
         temp.Employee_Id,
-        temp.Emp_Name,
+        MIN(temp.Emp_Name) AS Emp_Name,
         temp.Project_code,
         temp.ProcessMonth AS Month_YYYYMM
     FROM temp_combined_processlog AS temp
-    GROUP BY temp.Employee_Id, temp.Emp_Name, temp.Project_code, temp.ProcessMonth;
+    GROUP BY temp.Employee_Id,temp.Project_code, temp.ProcessMonth;
 
     -- Insert into Emp_Runrate_Report
     INSERT INTO Emp_Runrate_Report (Employee_Id, Emp_Name, Project_code, `Month`)
